@@ -7,6 +7,8 @@ Cut long videos (stream VODs, podcasts, gameplay) into **captioned, viral-style 
 - Cut any time range, or **find hype moments** automatically (loud + sudden audio spikes)
 - Frame size 9:16 / 4:5 / 1:1 / 16:9, resolution 480-1440, quality low-max, 24/30/60 fps
 - Framing: blurred background, crop, black bars, or **stack** (gameplay on top, facecam below, the popular stream-clip look)
+- **Paste a YouTube / Twitch link** and it downloads the video and clips it (only for videos you own or have permission to use)
+- **One-click auto-generate**: finds the hype moments and exports every clip
 - Batch export, command line **and** web UI, one-click presets
 
 **Captions**
@@ -25,12 +27,16 @@ Cut long videos (stream VODs, podcasts, gameplay) into **captioned, viral-style 
 ## Setup
 1. Install **Python 3.9+** and **FFmpeg** (`winget install ffmpeg` on Windows, `brew install ffmpeg` on Mac, `sudo apt install ffmpeg` on Linux).
 2. `pip install -r requirements.txt`
+3. **For YouTube links only:** install **Deno** (`winget install --id=DenoLand.Deno`), then restart the terminal. YouTube now needs it for downloads. If a link stops working, run `pip install -U "yt-dlp[default]"`.
 
 ## Use it
 **Web UI:** `streamlit run app.py`
 
 **Command line**
 ```bash
+# paste a link: download, find 5 moments, export them
+python cli.py "https://www.youtube.com/watch?v=XXXX" --auto 5 --preset viral
+
 # a viral-style clip with a hook and credit
 python cli.py vod.mp4 -c 00:12:30-00:13:00 --preset viral --hook "He actually did it" --credit "Clip from @streamer"
 
@@ -59,6 +65,7 @@ Any flag overrides the preset, e.g. `--preset viral --no-bleep --zoom 0`.
 - Always review auto-suggested moments. They are loudness-based, not a guarantee.
 - The first caption run downloads the Whisper model once (internet needed), then works offline.
 - Linux: if captions look wrong, install the Arial font or pass `--font` with one you have.
+- Link downloads are saved in `downloads/` at 720p by default (`--dl-res 480` is faster and smaller).
 - Only clip content you own or have permission to use, and credit the creator. Check Rockstar's and each platform's rules before posting game footage.
 
 ## Files
