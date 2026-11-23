@@ -74,6 +74,8 @@ with st.sidebar:
     tighten = st.toggle("Cut dead air / long pauses", value=P.tighten_silence, key=k("tight"))
     speed = st.slider("Speed", 0.8, 1.5, P.speed, 0.05, key=k("speed"))
     normalize = st.toggle("Normalize loudness", value=P.normalize, key=k("norm"))
+    auto_credit = st.toggle("Auto-credit the channel for links", value=True, key=k("autocred"),
+                            help="Adds 'Clip from <channel name>' when you paste a link")
     bleep = st.toggle("Bleep swearing", value=P.bleep, key=k("bleep"),
                       help="Masks swear words in captions and mutes them in the audio")
 
@@ -93,9 +95,46 @@ settings = C.ClipSettings(
 )
 
 # -------------------------------------------------------------------- source
-mode = st.radio("Video source", ["Local file path", "Upload"], horizontal=True)
-src = None
-if mode == "Local file path":
+@st.cache_data(show_spinner="Reading the link...")
+def cached_info(url: str) -> dict:
+    return C.video_info(url)
+
+
+SRC_LINK, SRC_PATH, SRC_UPLOAD = "Video link (YouTube, Twitch...)", "Local file path", "Upload"
+mode = st.radio("Video source", [SRC_LINK, SRC_PATH, SRC_UPLOAD], horizontal=True)
+src, uploader = None, ""
+
+if mode == SRC_LINK:
+    url = st.text_input("Paste the video link", placeholder="https://www.youtube.com/watch?v=...").strip()
+    dl_res = st.selectbox("Download quality", [480, 720, 1080], index=1,
+                          help="Lower = faster download and smaller file. 720 is plenty for shorts.")
+    st.caption("Only clip videos you own or have permission to use, and credit the creator.")
+    if url:
+        downloads = st.session_state.setdefault("downloads", {})
+        key = f"{url}|{dl_res}"
+        if key in downloads and Path(downloads[key]["path"]).is_file():
+            src, uploader = Path(downloads[key]["path"]), downloads[key]["uploader"]
+        else:
+            try:
+                meta = cached_info(url)
+            except RuntimeError as e:
+                st.error(str(e))
+                st.stop()
+            st.write(f"**{meta['title']}** by {meta['uploader'] or 'unknown'} ({C.fmt_time(meta['duration'])})")
+            if meta["duration"] > 2 * 3600:
+                st.warning("This is a long video, so the download will be big and slow. Try 480p.")
+            if st.button("⬇️ Download video", type="primary"):
+                with st.status("Downloading...", expanded=True) as status:
+                    try:
+                        path, _ = C.download_video(url, "downloads", dl_res, meta, st.write)
+                    except RuntimeError as e:
+                        status.update(label="Download failed", state="error")
+                        st.error(str(e))
+                        st.stop()
+                    status.update(label="Downloaded", state="complete")
+                downloads[key] = {"path": str(path), "uploader": meta["uploader"]}
+                src, uploader = path, meta["uploader"]
+elif mode == SRC_PATH:
     raw = st.text_input("Path to video", placeholder=r"C:\Videos\stream_vod.mp4")
     if raw.strip():
         candidate = Path(raw.strip().strip('"'))
@@ -115,6 +154,9 @@ else:
 if src is None:
     st.stop()
 
+if mode == SRC_LINK and uploader and auto_credit and not settings.credit.strip():
+    settings = C.replace(settings, credit=f"Clip from {uploader}")
+
 st.info(f"**{src.name}**: {C.fmt_time(C.probe_duration(src))} long")
 
 # ------------------------------------------------------------------ segments
@@ -122,44 +164,21 @@ if "rows" not in st.session_state:
     st.session_state.rows = pd.DataFrame({"Use": [True], "Start": ["00:00:00"], "End": ["00:00:30"]})
     st.session_state.ver = 0
 
-st.subheader("Clips")
-c1, c2, c3 = st.columns([1, 1, 2])
-clip_len = c1.slider("Auto clip length (s)", 10, 90, 30, help="Shorts work best at 20-45 seconds")
-how_many = c2.number_input("How many", 1, 20, 5)
-if c3.button("🔍 Find hype moments"):
-    with st.spinner("Scanning audio..."):
-        found = C.find_highlights(src, clip_len, int(how_many))
-    st.session_state.rows = pd.DataFrame({
-        "Use": [True] * len(found),
-        "Start": [C.fmt_time(a) for a, _, _ in found],
-        "End": [C.fmt_time(b) for _, b, _ in found],
-    })
-    st.session_state.ver += 1
 
-st.caption("Suggestions are based on loud, sudden audio spikes, so review them. Edit times "
-           "(seconds, MM:SS or HH:MM:SS), untick to skip, or add rows at the bottom.")
-table = st.data_editor(st.session_state.rows, num_rows="dynamic", key=f"editor_{st.session_state.ver}")
-
-out_dir = st.text_input("Save clips to folder", "clips")
-
-if st.button("🎬 Export clips", type="primary"):
-    jobs = [(r.Start, r.End) for r in table.itertuples() if r.Use and r.Start and r.End]
-    if not jobs:
-        st.warning("Tick at least one clip with a start and end time.")
-        st.stop()
+def export_jobs(jobs):
     results = []
     with st.status("Exporting...", expanded=True) as status:
         try:
             for i, (a, b) in enumerate(jobs, 1):
                 st.write(f"Clip {i}/{len(jobs)}: {a} → {b}")
                 results.append(C.make_clip(src, a, b, out_dir, settings, index=i, log=st.write))
-            status.update(label="Done!", state="complete")
+            status.update(label=f"Done! {len(results)} clip(s) saved in the '{out_dir}' folder", state="complete")
         except (RuntimeError, ValueError) as e:
             status.update(label="Failed", state="error")
             st.error(str(e))
     for path in results:
         st.video(str(path))
-        d1, d2, d3 = st.columns(3)
+        d1, d2 = st.columns(2)
         d1.download_button(f"Download {path.name}", path.read_bytes(), file_name=path.name, mime="video/mp4")
         if path.with_suffix(".jpg").exists():
             d2.download_button("Thumbnail", path.with_suffix(".jpg").read_bytes(),
@@ -167,3 +186,44 @@ if st.button("🎬 Export clips", type="primary"):
         if path.with_suffix(".txt").exists():
             with st.expander("Title + hashtags"):
                 st.code(path.with_suffix(".txt").read_text(encoding="utf-8"))
+
+
+st.subheader("Clips")
+c1, c2 = st.columns(2)
+clip_len = c1.slider("Clip length (s)", 10, 90, 30, help="Shorts work best at 20-45 seconds")
+how_many = c2.number_input("How many clips", 1, 20, 5)
+out_dir = st.text_input("Save clips to folder", "clips")
+
+b1, b2 = st.columns(2)
+auto = b1.button("⚡ Auto-generate clips", type="primary",
+                 help="Finds the hype moments and exports them all in one click")
+find = b2.button("🔍 Just find hype moments")
+
+auto_jobs = None
+if auto or find:
+    with st.spinner("Scanning audio..."):
+        found = C.find_highlights(src, clip_len, int(how_many))
+    if not found:
+        st.warning("No moments found. Add clip times in the table below.")
+    else:
+        st.session_state.rows = pd.DataFrame({
+            "Use": [True] * len(found),
+            "Start": [C.fmt_time(a) for a, _, _ in found],
+            "End": [C.fmt_time(b) for _, b, _ in found],
+        })
+        st.session_state.ver += 1
+        if auto:
+            auto_jobs = [(C.fmt_time(a), C.fmt_time(b)) for a, b, _ in found]
+
+st.caption("Suggestions are based on loud, sudden audio spikes, so review them. Edit times "
+           "(seconds, MM:SS or HH:MM:SS), untick to skip, or add rows at the bottom.")
+table = st.data_editor(st.session_state.rows, num_rows="dynamic", key=f"editor_{st.session_state.ver}")
+
+if auto_jobs:
+    export_jobs(auto_jobs)
+elif st.button("🎬 Export selected clips"):
+    jobs = [(r.Start, r.End) for r in table.itertuples() if r.Use and r.Start and r.End]
+    if jobs:
+        export_jobs(jobs)
+    else:
+        st.warning("Tick at least one clip with a start and end time.")
