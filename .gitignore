@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+clips/
+*.mp4
+*.mkv
+*.wav
+.DS_Store
