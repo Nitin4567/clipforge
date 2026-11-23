@@ -507,3 +507,72 @@ def make_clips(source, segments: Sequence[Tuple[Time, Time]], out_dir,
         log(f"[{i}/{len(segments)}] {a} -> {b}")
         outputs.append(make_clip(source, a, b, out_dir, settings, index=i, log=log))
     return outputs
+
+
+# ------------------------------------------------------------ link download
+_LINK_HELP = ("Check the link is public. For YouTube also install Deno (winget install --id=DenoLand.Deno), "
+              "restart the terminal, then run: pip install -U \"yt-dlp[default]\"")
+
+
+def _ytdlp():
+    try:
+        import yt_dlp
+    except ImportError:
+        raise RuntimeError("Link downloads need yt-dlp. Run: pip install -r requirements.txt")
+    return yt_dlp
+
+
+def video_info(url: str) -> dict:
+    """Title, channel and length of a YouTube / Twitch / etc. link, without downloading it."""
+    yt_dlp = _ytdlp()
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        raise RuntimeError(f"Couldn't read that link: {str(e)[-300:]}\n{_LINK_HELP}")
+    if info.get("is_live"):
+        raise RuntimeError("That is a live stream. Wait until it ends, then use the saved video's link.")
+    return {"title": info.get("title") or "video",
+            "uploader": info.get("uploader") or info.get("channel") or "",
+            "duration": float(info.get("duration") or 0)}
+
+
+def download_video(url: str, out_dir="downloads", max_height: int = 720, meta: Optional[dict] = None,
+                   log: Callable[[str], None] = print):
+    """Download a video link as mp4. Returns (path, meta). Only use on videos you may clip."""
+    yt_dlp = _ytdlp()
+    check_ffmpeg()
+    meta = meta or video_info(url)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    last = {"p": -10}
+
+    def hook(d):
+        if d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if total:
+                pct = int(d.get("downloaded_bytes", 0) * 100 / total)
+                if pct >= last["p"] + 10:
+                    last["p"] = pct
+                    log(f"  downloading... {pct}%")
+
+    opts = {
+        "format": f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
+        "outtmpl": str(out_dir / "%(title).60s [%(id)s].%(ext)s"),
+        "merge_output_format": "mp4", "noplaylist": True, "quiet": True, "no_warnings": True,
+        "restrictfilenames": True, "windowsfilenames": True, "retries": 3, "noprogress": True,
+        "progress_hooks": [hook],
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except Exception as e:
+        raise RuntimeError(f"Download failed: {str(e)[-300:]}\n{_LINK_HELP}")
+    files = [d.get("filepath") for d in (info.get("requested_downloads") or []) if d.get("filepath")]
+    path = Path(files[0]) if files else None
+    if path is None or not path.is_file():  # fallback: find the file by video id
+        found = sorted(out_dir.glob(f"*{info.get('id', '')}*.mp4"), key=lambda p: p.stat().st_mtime)
+        path = found[-1] if found else None
+    if path is None:
+        raise RuntimeError("Download finished but the file could not be found.")
+    return path, meta
