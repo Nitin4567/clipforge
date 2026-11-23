@@ -1,6 +1,7 @@
 """ClipForge command line.
 
 Examples:
+  python cli.py "https://www.youtube.com/watch?v=XXXX" --auto 5 --preset viral
   python cli.py vod.mp4 -c 00:12:30-00:13:00 --preset viral --hook "He actually did it"
   python cli.py vod.mp4 --auto 5 --length 30 --preset stream-stack --credit "Clip from @streamer"
   python cli.py vod.mp4 -c 10:00-10:45 --no-captions --fit crop --res 720
@@ -28,13 +29,15 @@ def parse_facecam(text: str):
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Cut long videos into captioned, viral-style short clips.")
-    p.add_argument("video")
+    p.add_argument("video", help="video file path OR a YouTube / Twitch link")
     p.add_argument("-c", "--clip", action="append", type=parse_range, default=[], metavar="START-END",
                    help="clip range (repeatable). Times: seconds, MM:SS or HH:MM:SS")
     p.add_argument("--auto", type=int, default=0, metavar="N", help="auto-suggest N loudest moments")
     p.add_argument("--length", type=float, default=30, help="clip length for --auto (seconds, default 30)")
     p.add_argument("--preset", choices=list(C.PRESETS), help="starting point; other flags override it")
     p.add_argument("-o", "--out", default="clips", help="output folder (default: clips)")
+    p.add_argument("--dl-res", type=int, default=720, choices=[480, 720, 1080], help="download quality for links")
+    p.add_argument("--no-auto-credit", action="store_true", help="don't add 'Clip from <channel>' for links")
 
     g = p.add_argument_group("output")
     g.add_argument("--aspect", choices=list(C.ASPECTS))
@@ -72,10 +75,20 @@ def main() -> int:
     g.add_argument("--hashtags", help='e.g. "#gta6 #gaming"')
     a = p.parse_args()
 
+    video, meta = a.video, None
+    if video.lower().startswith(("http://", "https://")):
+        try:
+            print("Downloading video...")
+            video, meta = C.download_video(video, "downloads", a.dl_res)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        print(f"Saved: {video}")
+
     segments = list(a.clip)
     if a.auto:
         print(f"Scanning audio for {a.auto} moments...")
-        for start, end, score in C.find_highlights(a.video, a.length, a.auto):
+        for start, end, score in C.find_highlights(video, a.length, a.auto):
             print(f"  suggested {C.fmt_time(start)} -> {C.fmt_time(end)} (score {score:.1f})")
             segments.append((start, end))
     if not segments:
@@ -94,8 +107,10 @@ def main() -> int:
     }
     base = C.apply_preset(a.preset) if a.preset else C.ClipSettings()
     settings = C.replace(base, **{k: v for k, v in over.items() if v is not None})
+    if meta and meta["uploader"] and not settings.credit and not a.no_auto_credit:
+        settings = C.replace(settings, credit=f"Clip from {meta['uploader']}")
     try:
-        outputs = C.make_clips(a.video, segments, a.out, settings)
+        outputs = C.make_clips(video, segments, a.out, settings)
     except (RuntimeError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
